@@ -55,6 +55,8 @@ static int configure_signals(int wakeup_fd)
     return sigaction(SIGPIPE, &action, NULL);
 }
 
+// Close the listening socket and the pipe used to wake the event loop.
+// Called by main() during cleanup and server_open() if setup fails.
 void server_close(struct server *server)
 {
     signal_write_fd = -1;
@@ -68,6 +70,8 @@ void server_close(struct server *server)
     server->listener = -1;
 }
 
+// Prepare the non-blocking listener, shutdown pipe, and signal handlers.
+// Called by main() before optional daemonization and server_run().
 int server_open(struct server *server, const struct server_config *config,
                 struct logger *log)
 {
@@ -119,6 +123,8 @@ failure:
     }
 }
 
+// Accept waiting connections and register their sockets and initial nicknames.
+// Called by server_run() when select() marks the listener as readable.
 static int accept_clients(struct server *server, struct clients *clients,
                            struct logger *log)
 {
@@ -126,11 +132,11 @@ static int accept_clients(struct server *server, struct clients *clients,
     for (int attempt = 0; attempt < 16 && !stopping; ++attempt) {
         struct sockaddr_in address;
         socklen_t size = sizeof(address);
-        int fd = accept(server->listener, (struct sockaddr *)&address, &size);
+        int fd = accept(server->listener, (struct sockaddr *)&address, &size); // New client socket.
         if (fd == -1) {
             if (errno == EINTR)
                 continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            if (errno == EAGAIN || errno == EWOULDBLOCK) // No more connections ready now.
                 return 0;
             if (errno == ECONNABORTED)
                 continue;
@@ -170,6 +176,8 @@ static void reject_line(struct client *client, const char *message, const char *
     client->close_reason = reason;
 }
 
+// Accumulate received bytes and pass each complete line to chat_handle_line().
+// Called by read_client() after recv() returns data.
 static void consume_input(struct clients *clients, struct client *client,
                            const char *data, size_t length, struct logger *log)
 {
@@ -203,12 +211,14 @@ static void consume_input(struct clients *clients, struct client *client,
     }
 }
 
+// Receive available bytes and handle end-of-input or a connection error.
+// Called by server_run() when the client's socket is ready for reading.
 static void read_client(struct clients *clients, struct client *client,
                          struct logger *log)
 {
     // Read one chunk per ready client, then give other clients their turn.
     char buffer[4096];
-    ssize_t n = recv(client->fd, buffer, sizeof(buffer), 0);
+    ssize_t n = recv(client->fd, buffer, sizeof(buffer), 0); // Byte count, 0 for EOF, or -1.
     if (n > 0) {
         consume_input(clients, client, buffer, (size_t)n, log);
     } else if (n == 0) {
@@ -225,6 +235,8 @@ static void read_client(struct clients *clients, struct client *client,
     }
 }
 
+// Send queued output without blocking, keeping any unsent bytes for later.
+// Called by server_run() when the client's socket is ready for writing.
 static void write_client(struct client *client, struct logger *log)
 {
     /* Send only queued bytes; a partial send leaves the remainder for later.
@@ -244,6 +256,8 @@ static void write_client(struct client *client, struct logger *log)
     }
 }
 
+// Log and remove failed clients or clients whose final output has been sent.
+// Called by server_run() before building the sets and after handling events.
 static void remove_finished(struct clients *clients, struct logger *log)
 {
     for (size_t i = 0; i < MAX_CLIENTS; ++i) {
@@ -258,53 +272,57 @@ static void remove_finished(struct clients *clients, struct logger *log)
     }
 }
 
+// Handle all clients in one select() loop until shutdown or a fatal error.
+// Called by main() after startup and optional daemonization.
 int server_run(struct server *server, struct clients *clients, struct logger *log)
 {
-    while (!stopping) {
+    while (!stopping) { // Repeat until SIGINT or SIGTERM requests shutdown.
         /* 1. Build fresh sets: listener and active readers, plus pending writers. */
         remove_finished(clients, log);
-        fd_set readers, writers;
-        FD_ZERO(&readers);
-        FD_ZERO(&writers);
-        FD_SET(server->listener, &readers);
-        FD_SET(server->wakeup[0], &readers);
+        fd_set readers, writers;              // Descriptor sets for read/write readiness.
+        FD_ZERO(&readers);                     // Clear the previous read selection.
+        FD_ZERO(&writers);                     // Clear the previous write selection.
+        FD_SET(server->listener, &readers);    // Watch for new connection requests.
+        FD_SET(server->wakeup[0], &readers);    // Watch for the signal handler's wakeup byte.
+        // Start with the highest server descriptor; there may be no clients yet.
         int maximum = server->listener > server->wakeup[0]
                       ? server->listener : server->wakeup[0];
         for (size_t i = 0; i < MAX_CLIENTS; ++i) {
             struct client *client = &clients->items[i];
-            if (client->fd == -1)
+            if (client->fd == -1) // Skip unused client slots.
                 continue;
             if (!client->closing)
-                FD_SET(client->fd, &readers);
+                FD_SET(client->fd, &readers); // Watch clients still allowed to send input.
             if (client->output_used != 0)
-                FD_SET(client->fd, &writers);
+                FD_SET(client->fd, &writers); // Watch writers only when output is queued.
             if (client->fd > maximum)
-                maximum = client->fd;
+                maximum = client->fd;        // Track the highest descriptor, not their count.
         }
 
         /* 2. Sleep until activity or a shutdown signal; no busy polling or idle exit.
            Highest descriptor + 1, read set, write set, no exception set or timeout. */
         int ready = select(maximum + 1, &readers, &writers, NULL, NULL);
-        if (ready == -1) {
-            if (errno == EINTR)
+        // On success, the sets now contain only descriptors ready for those operations.
+        if (ready == -1) { // select() failed; errno identifies the reason.
+            if (errno == EINTR) // A signal interrupted the wait; rebuild sets and retry.
                 continue;
             logger_write(log, "ERROR", "select: %s", strerror(errno));
             return -1;
         }
-        if (stopping || FD_ISSET(server->wakeup[0], &readers))
+        if (stopping || FD_ISSET(server->wakeup[0], &readers)) // Test shutdown readiness.
             break;
 
         /* 3. Accept newcomers, then advance each ready connection independently. */
-        if (FD_ISSET(server->listener, &readers) &&
+        if (FD_ISSET(server->listener, &readers) && // Is a new connection waiting?
             accept_clients(server, clients, log) == -1)
             return -1;
         for (size_t i = 0; i < MAX_CLIENTS; ++i) {
             struct client *client = &clients->items[i];
             if (client->fd == -1 || client->failed)
                 continue;
-            if (!client->closing && FD_ISSET(client->fd, &readers))
+            if (!client->closing && FD_ISSET(client->fd, &readers)) // Can recv() make progress?
                 read_client(clients, client, log);
-            if (!client->failed && FD_ISSET(client->fd, &writers))
+            if (!client->failed && FD_ISSET(client->fd, &writers)) // Can send() make progress?
                 write_client(client, log);
         }
 

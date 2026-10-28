@@ -6,6 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
+// Allocate client slots and buffers, initially marking every slot as unused.
+// Called by main() during startup, before opening the server.
 int clients_init(struct clients *clients)
 {
     /* Keep the large per-client buffers on the heap, not main()'s stack. */
@@ -18,6 +20,8 @@ int clients_init(struct clients *clients)
     return 0;
 }
 
+// Find an active participant by their exact, case-sensitive nickname.
+// Called by clients_add() and chat.c for name checks and private-message routing.
 struct client *clients_find(struct clients *clients, const char *nickname)
 {
     for (size_t i = 0; i < MAX_CLIENTS; ++i) {
@@ -29,6 +33,8 @@ struct client *clients_find(struct clients *clients, const char *nickname)
     return NULL;
 }
 
+// Register a connected socket in a free slot and assign a unique guest name.
+// Called by server.c's accept_clients() after accepting and configuring a socket.
 struct client *clients_add(struct clients *clients, int fd, const char *peer)
 {
     if (clients->count == MAX_CLIENTS) {
@@ -69,6 +75,8 @@ struct client *clients_add(struct clients *clients, int fd, const char *peer)
     return client;
 }
 
+// Append outgoing bytes for a later send, marking clients that exceed the buffer limit.
+// Called by chat.c's reply() and server.c's reject_line() to queue messages.
 int clients_queue(struct client *client, const char *data, size_t length)
 {
     if (client->failed)
@@ -91,6 +99,8 @@ int clients_queue(struct client *client, const char *data, size_t length)
     return 0;
 }
 
+// Close one client's socket, clear its state, and make its slot available again.
+// Called by server.c's remove_finished() and by clients_close().
 void clients_remove(struct clients *clients, struct client *client)
 {
     if (client->fd == -1)
@@ -102,6 +112,8 @@ void clients_remove(struct clients *clients, struct client *client)
     --clients->count;
 }
 
+// Close all registered client sockets and free the shared client storage.
+// Called by main() during shutdown or cleanup after a startup failure.
 void clients_close(struct clients *clients)
 {
     if (clients->items == NULL)
