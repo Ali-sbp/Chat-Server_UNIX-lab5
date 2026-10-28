@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+// Format a reply and queue its bytes for server.c to send when the socket is ready.
+// Called by the welcome, message-routing, and command-handling functions below.
 static int reply(struct client *client, const char *format, ...)
 {
     char message[MAX_LINE_SIZE + MAX_NICK_SIZE + 128];
@@ -56,11 +58,15 @@ static int valid_nickname(const char *name)
     return 1;
 }
 
+// Queue the initial greeting with the client's assigned guest nickname.
+// Called by server.c's accept_clients() after registering a new connection.
 void chat_welcome(struct client *client)
 {
     reply(client, "INFO connected as %s; use /help for commands\n", client->nickname);
 }
 
+// Validate a requested nickname, check uniqueness, and confirm the name change.
+// Called by chat_handle_line() for the /nick command.
 static void change_nickname(struct clients *clients, struct client *client,
                             char *arguments, struct logger *log)
 {
@@ -70,7 +76,7 @@ static void change_nickname(struct clients *clients, struct client *client,
               MAX_NICK_SIZE);
         return;
     }
-    struct client *existing = clients_find(clients, name);
+    struct client *existing = clients_find(clients, name); // Check whether another client owns it.
     if (existing != NULL && existing != client) {
         reply(client, "ERROR nickname already in use\n");
         return;
@@ -81,10 +87,12 @@ static void change_nickname(struct clients *clients, struct client *client,
     reply(client, "INFO nickname is %s\n", client->nickname);
 }
 
+// Queue a private message for one named recipient and acknowledge it to the sender.
+// Called by chat_handle_line() for the /msg command.
 static void private_message(struct clients *clients, struct client *sender,
                             char *arguments, struct logger *log)
 {
-    char *name = next_word(&arguments);
+    char *name = next_word(&arguments); // Extract the recipient; arguments now holds the text.
     if (name == NULL || *arguments == '\0') {
         reply(sender, "ERROR usage: /msg NAME TEXT\n");
         return;
@@ -104,18 +112,22 @@ static void private_message(struct clients *clients, struct client *sender,
                  sender->nickname, recipient->nickname, strlen(arguments));
 }
 
+// Queue the same chat message for every active participant, including the sender.
+// Called by chat_handle_line() for ordinary text without a leading slash.
 static void broadcast(struct clients *clients, struct client *sender,
                        const char *text, struct logger *log)
 {
     /* Broadcast is application-level fan-out over TCP, including the sender. */
     for (size_t i = 0; i < MAX_CLIENTS; ++i) {
         struct client *recipient = &clients->items[i];
-        if (recipient->fd != -1 && !recipient->closing && !recipient->failed)
+        if (recipient->fd != -1 && !recipient->closing && !recipient->failed) // Active participants only.
             reply(recipient, "[all] %s: %s\n", sender->nickname, text);
     }
     logger_write(log, "INFO", "broadcast from=%s bytes=%zu", sender->nickname, strlen(text));
 }
 
+// Validate one complete input line, then route its message or execute its command.
+// Called by server.c's consume_input() whenever a newline completes a message.
 void chat_handle_line(struct clients *clients, struct client *client,
                       char *line, struct logger *log)
 {
@@ -126,7 +138,7 @@ void chat_handle_line(struct clients *clients, struct client *client,
             return;
         }
     }
-    if (*line == '\0')
+    if (*line == '\0') // Ignore empty messages.
         return;
 
     /* 2. Plain text is a broadcast; slash-prefixed lines are commands. */
@@ -135,7 +147,7 @@ void chat_handle_line(struct clients *clients, struct client *client,
         return;
     }
     char *arguments = line;
-    char *command = next_word(&arguments);
+    char *command = next_word(&arguments); // Separate the command from its remaining arguments.
 
     /* 3. Dispatch commands; all replies go to buffers, never directly to send(). */
     if (strcmp(command, "/nick") == 0) {
@@ -143,6 +155,7 @@ void chat_handle_line(struct clients *clients, struct client *client,
     } else if (strcmp(command, "/msg") == 0) {
         private_message(clients, client, arguments, log);
     } else if (strcmp(command, "/help") == 0 && *arguments == '\0') {
+        // Queue the command list for the requesting client only.
         reply(client, "INFO commands:\n"
                       "  /nick NAME     choose a unique nickname\n"
                       "  /msg NAME TEXT send a private message\n"
@@ -151,6 +164,7 @@ void chat_handle_line(struct clients *clients, struct client *client,
                       "  /quit          disconnect\n"
                       "  Plain text     broadcast to everyone, including yourself\n");
     } else if (strcmp(command, "/who") == 0 && *arguments == '\0') {
+        // List active nicknames; omit unused slots and clients already leaving.
         reply(client, "INFO participants:\n");
         for (size_t i = 0; i < MAX_CLIENTS; ++i) {
             struct client *listed = &clients->items[i];
@@ -160,7 +174,7 @@ void chat_handle_line(struct clients *clients, struct client *client,
         reply(client, "INFO end of participants\n");
     } else if (strcmp(command, "/quit") == 0 && *arguments == '\0') {
         reply(client, "INFO goodbye\n");
-        client->closing = 1;
+        client->closing = 1; // Stop accepting input; server.c sends the goodbye before closing.
         client->close_reason = "quit command";
     } else {
         reply(client, "ERROR unknown command or arguments; use /help\n");
