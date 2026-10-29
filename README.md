@@ -39,6 +39,7 @@ Each connection receives a unique temporary name, such as `guest1`. In the first
 client, enter `/nick Alice`; in the second, enter `/nick Bob`. Press Enter after
 each command or message.
 
+<!-- TODO 1/2: Changed command examples for receipt times and /b; previous table preserved:
 | Input | Result |
 | --- | --- |
 | `Hello everyone` | Every participant, including the sender, receives `[all] Alice: Hello everyone` |
@@ -47,6 +48,31 @@ each command or message.
 | `/who` | List the current participants |
 | `/help` | Show commands |
 | `/quit` | Receive a goodbye and disconnect |
+-->
+
+| Input | Result |
+| --- | --- |
+| `Hello everyone` | Every participant, including the sender, receives `[12:34:56] [all] Alice: Hello everyone` |
+| `/b Hello everyone` | Explicit broadcast using the same timestamped format as plain text |
+| `/msg Bob Hello Bob` | Only Bob receives `[12:34:56] [private] Alice: Hello Bob`; Alice gets a queue confirmation |
+| `/nick Alice` | Choose a unique, case-sensitive nickname |
+| `/who` | List the current participants |
+| `/help` | Show commands |
+| `/quit` | Receive a goodbye and disconnect |
+
+<!-- TODO 1: Document exactly what the added receipt timestamp means. -->
+The `[HH:MM:SS]` prefix shows the server's local time when the complete incoming
+message is handled. It is captured once and shared by all broadcast recipients.
+It does not measure when netcat receives or displays the bytes. System replies,
+such as errors and queue confirmations, keep their existing format.
+
+<!-- TODO 2: Document the added explicit broadcast command and its validation. -->
+`/b TEXT` broadcasts to everyone, including the sender; plain-text broadcasts
+remain supported. Empty `/b` commands return `ERROR usage: /b TEXT`. To demonstrate:
+
+```sh
+printf '/nick Alice\n/b Hello everyone\n' | nc -w 2 127.0.0.1 3425
+```
 
 A private-message confirmation means the server queued the message; it is not an
 acknowledgment from the recipient. Nicknames contain 1-24 ASCII letters, digits,
