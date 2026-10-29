@@ -58,6 +58,12 @@ class Peer:
         if isinstance(expected, str):
             expected = expected.encode()
         actual = self.line()
+        # TODO 1: Require a valid timestamp on chat messages; retain the original body checks.
+        if expected.startswith((b'[all] ', b'[private] ')):
+            match = re.fullmatch(rb'\[([0-9]{2}:[0-9]{2}:[0-9]{2})\] (.*)', actual)
+            assert match is not None, ('missing receipt timestamp', actual)
+            time.strptime(match.group(1).decode(), '%H:%M:%S')
+            actual = match.group(2)
         assert actual == expected, (actual, expected)
 
     def quiet(self):
@@ -241,6 +247,80 @@ def routing_and_framing(directory):
     print('PASS routing, privacy, commands, framing, input limits, half-close and disconnects')
 
 
+# TODO 2: Verify /b routing, command-like text, missing arguments, and updated help.
+def broadcast_command(directory):
+    with Server(directory) as server, Peer(server.port) as alice, \
+            Peer(server.port) as bob, Peer(server.port) as carol:
+        alice.nick('Alice')
+        bob.nick('Bob')
+        carol.nick('Carol')
+
+        alice.send('/b Hello from command\n')
+        for peer in (alice, bob, carol):
+            peer.expect('[all] Alice: Hello from command')
+
+        alice.send('/b\n/b   \n/b\t\n')
+        for _ in range(3):
+            alice.expect('ERROR usage: /b TEXT')
+
+        alice.send('/b /msg Bob this is broadcast text\n')
+        for peer in (alice, bob, carol):
+            peer.expect('[all] Alice: /msg Bob this is broadcast text')
+
+        alice.send('/b split')
+        time.sleep(0.03)
+        alice.send(' message\r\n')
+        for peer in (alice, bob, carol):
+            peer.expect('[all] Alice: split message')
+
+        alice.send('/help\n')
+        help_lines = []
+        while True:
+            line = alice.line()
+            help_lines.append(line)
+            if line.startswith(b'  Plain text'):
+                break
+        assert b'  /b TEXT        broadcast to everyone, including yourself' in help_lines
+    print('PASS /b broadcasts, argument validation, framing and help')
+
+
+# TODO 1: Check real server-local receipt time and identical timestamps for all recipients.
+def receipt_timestamps(directory):
+    def check_message(line, body, before, after):
+        match = re.fullmatch(rb'\[([0-9]{2}:[0-9]{2}:[0-9]{2})\] (.*)', line)
+        assert match is not None and match.group(2) == body, line
+        allowed = {time.strftime('%H:%M:%S', time.localtime(second)).encode()
+                   for second in range(before, after + 1)}
+        assert match.group(1) in allowed, (line, allowed)
+
+    with Server(directory) as server, Peer(server.port) as alice, \
+            Peer(server.port) as bob, Peer(server.port) as carol:
+        alice.nick('Alice')
+        bob.nick('Bob')
+        carol.nick('Carol')
+
+        # Finish a fragmented command in a later second: time belongs to the full line.
+        first_second = int(time.time())
+        alice.send('/b complete line time')
+        while int(time.time()) == first_second:
+            time.sleep(0.02)
+        before = int(time.time())
+        alice.send('\n')
+        messages = [peer.line() for peer in (alice, bob, carol)]
+        after = int(time.time())
+        assert messages[0] == messages[1] == messages[2], messages
+        check_message(messages[0], b'[all] Alice: complete line time', before, after)
+
+        before = int(time.time())
+        alice.send('/msg Bob private clock\n')
+        message = bob.line()
+        after = int(time.time())
+        check_message(message, b'[private] Alice: private clock', before, after)
+        alice.expect('INFO queued for Bob')
+        carol.quiet()
+    print('PASS server-local receipt timestamps, complete-line timing and consistent broadcast time')
+
+
 def capacity(directory):
     with Server(directory) as server:
         # Let the startup probe's EOF be processed before filling every slot.
@@ -335,6 +415,10 @@ def interrupt_idle_server(directory):
 
 with tempfile.TemporaryDirectory(prefix='unix-chat-tests-') as directory:
     routing_and_framing(directory)
+    # TODO 2: Exercise the explicit broadcast command alongside the original checks.
+    broadcast_command(directory)
+    # TODO 1: Check timestamp meaning as well as the timestamped message format.
+    receipt_timestamps(directory)
     capacity(directory)
     slow_reader(directory)
     daemon_and_errors(directory)
