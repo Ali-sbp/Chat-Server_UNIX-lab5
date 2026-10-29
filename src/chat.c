@@ -3,6 +3,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+// TODO 1: Use the server's local clock for message receipt timestamps.
+#include <time.h>
 
 // Format a reply and queue its bytes for server.c to send when the socket is ready.
 // Called by the welcome, message-routing, and command-handling functions below.
@@ -58,6 +60,18 @@ static int valid_nickname(const char *name)
     return 1;
 }
 
+// TODO 1: Format the time at which the server handles a complete incoming line.
+// Called by chat_handle_line(); the same timestamp is passed to every recipient.
+static int received_time(char timestamp[9])
+{
+    time_t now = time(NULL);
+    struct tm local;
+    if (now == (time_t)-1 || localtime_r(&now, &local) == NULL ||
+        strftime(timestamp, 9, "%H:%M:%S", &local) == 0)
+        return -1;
+    return 0;
+}
+
 // Queue the initial greeting with the client's assigned guest nickname.
 // Called by server.c's accept_clients() after registering a new connection.
 void chat_welcome(struct client *client)
@@ -89,8 +103,11 @@ static void change_nickname(struct clients *clients, struct client *client,
 
 // Queue a private message for one named recipient and acknowledge it to the sender.
 // Called by chat_handle_line() for the /msg command.
+// TODO 1: Changed signature: accept the receipt time captured by chat_handle_line().
+// static void private_message(struct clients *clients, struct client *sender,
+//                             char *arguments, struct logger *log)
 static void private_message(struct clients *clients, struct client *sender,
-                            char *arguments, struct logger *log)
+                            char *arguments, const char *timestamp, struct logger *log)
 {
     char *name = next_word(&arguments); // Extract the recipient; arguments now holds the text.
     if (name == NULL || *arguments == '\0') {
@@ -103,7 +120,10 @@ static void private_message(struct clients *clients, struct client *sender,
         return;
     }
     /* Queue to this recipient only; the sender gets a delivery-to-queue notice. */
-    if (reply(recipient, "[private] %s: %s\n", sender->nickname, arguments) == -1) {
+    // TODO 1: Changed message format: show server receipt time before the private message.
+    // if (reply(recipient, "[private] %s: %s\n", sender->nickname, arguments) == -1) {
+    if (reply(recipient, "[%s] [private] %s: %s\n",
+              timestamp, sender->nickname, arguments) == -1) {
         reply(sender, "ERROR recipient cannot receive more messages\n");
         return;
     }
@@ -114,14 +134,20 @@ static void private_message(struct clients *clients, struct client *sender,
 
 // Queue the same chat message for every active participant, including the sender.
 // Called by chat_handle_line() for ordinary text without a leading slash.
+// TODO 2: Also called by chat_handle_line() for the explicit /b TEXT command.
+// TODO 1: Changed signature: accept one receipt time shared by the whole broadcast.
+// static void broadcast(struct clients *clients, struct client *sender,
+//                        const char *text, struct logger *log)
 static void broadcast(struct clients *clients, struct client *sender,
-                       const char *text, struct logger *log)
+                       const char *text, const char *timestamp, struct logger *log)
 {
     /* Broadcast is application-level fan-out over TCP, including the sender. */
     for (size_t i = 0; i < MAX_CLIENTS; ++i) {
         struct client *recipient = &clients->items[i];
         if (recipient->fd != -1 && !recipient->closing && !recipient->failed) // Active participants only.
-            reply(recipient, "[all] %s: %s\n", sender->nickname, text);
+            // TODO 1: Changed message format: all recipients see the same receipt time.
+            // reply(recipient, "[all] %s: %s\n", sender->nickname, text);
+            reply(recipient, "[%s] [all] %s: %s\n", timestamp, sender->nickname, text);
     }
     logger_write(log, "INFO", "broadcast from=%s bytes=%zu", sender->nickname, strlen(text));
 }
@@ -141,9 +167,19 @@ void chat_handle_line(struct clients *clients, struct client *client,
     if (*line == '\0') // Ignore empty messages.
         return;
 
+    // TODO 1: Capture receipt time once, before choosing private or broadcast routing.
+    char timestamp[9]; // HH:MM:SS plus the final zero byte.
+    if (received_time(timestamp) == -1) {
+        logger_write(log, "ERROR", "cannot format message receipt time");
+        reply(client, "ERROR cannot read message time\n");
+        return;
+    }
+
     /* 2. Plain text is a broadcast; slash-prefixed lines are commands. */
     if (*line != '/') {
-        broadcast(clients, client, line, log);
+        // TODO 1: Changed call: carry the captured receipt time into the broadcast.
+        // broadcast(clients, client, line, log);
+        broadcast(clients, client, line, timestamp, log);
         return;
     }
     char *arguments = line;
@@ -153,12 +189,24 @@ void chat_handle_line(struct clients *clients, struct client *client,
     if (strcmp(command, "/nick") == 0) {
         change_nickname(clients, client, arguments, log);
     } else if (strcmp(command, "/msg") == 0) {
-        private_message(clients, client, arguments, log);
+        // TODO 1: Changed call: carry the captured receipt time into the private message.
+        // private_message(clients, client, arguments, log);
+        private_message(clients, client, arguments, timestamp, log);
+    // TODO 2: Add explicit broadcasting through /b while keeping plain-text broadcasts.
+    } else if (strcmp(command, "/b") == 0) {
+        if (*arguments == '\0')
+            reply(client, "ERROR usage: /b TEXT\n");
+        else
+            // TODO 1: Changed call: /b uses the same timestamped format as plain text.
+            // broadcast(clients, client, arguments, log);
+            broadcast(clients, client, arguments, timestamp, log);
     } else if (strcmp(command, "/help") == 0 && *arguments == '\0') {
         // Queue the command list for the requesting client only.
         reply(client, "INFO commands:\n"
                       "  /nick NAME     choose a unique nickname\n"
                       "  /msg NAME TEXT send a private message\n"
+                      // TODO 2: Advertise the newly added broadcast command.
+                      "  /b TEXT        broadcast to everyone, including yourself\n"
                       "  /who           list participants\n"
                       "  /help          show this help\n"
                       "  /quit          disconnect\n"
